@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>NOVA Playground</title>
+<style>
+:root{
+  --bg:#0d1117; --panel:#12181f; --line:#1e2731; --text:#d8dee9; --dim:#6b7684;
+  --accent:#5fd0a0; --accent2:#e8a556; --err:#f07868; --font-mono:'JetBrains Mono','Fira Code',Consolas,monospace;
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{
+  background:var(--bg); color:var(--text); font-family:var(--font-mono);
+  display:flex; flex-direction:column;
+  padding-top:env(safe-area-inset-top,0px); padding-bottom:env(safe-area-inset-bottom,0px);
+}
+header{
+  padding:18px 22px 14px; border-bottom:1px solid var(--line);
+  display:flex; align-items:baseline; gap:14px; flex-wrap:wrap;
+}
+.logo{font-size:1.3rem; font-weight:700; letter-spacing:.02em}
+.logo span{color:var(--accent)}
+.tag{color:var(--dim); font-size:.85rem}
+main{
+  flex:1; display:flex; gap:1px; background:var(--line); min-height:0;
+  flex-wrap:wrap;
+}
+.pane{background:var(--panel); display:flex; flex-direction:column; min-width:320px; flex:1 1 420px; min-height:280px}
+.pane h2{
+  margin:0; padding:10px 16px; font-size:.75rem; letter-spacing:.06em; color:var(--dim);
+  border-bottom:1px solid var(--line); display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;
+}
+textarea{
+  flex:1; background:transparent; color:var(--text); border:0; outline:0; resize:none;
+  font-family:var(--font-mono); font-size:.92rem; line-height:1.55; padding:16px; tab-size:4;
+}
+#output{
+  flex:1; overflow:auto; padding:16px; font-size:.88rem; line-height:1.6; white-space:pre-wrap; word-break:break-word;
+}
+.line-out{color:var(--text)}
+.line-err{color:var(--err)}
+.line-trace{color:var(--dim)}
+.toolbar{display:flex; gap:8px; align-items:center; flex-wrap:wrap}
+button, select{
+  font-family:var(--font-mono); background:var(--line); color:var(--text); border:1px solid #2a3542;
+  padding:6px 12px; border-radius:5px; font-size:.78rem; cursor:pointer;
+}
+button.run{background:var(--accent); color:#08130e; border-color:var(--accent); font-weight:700}
+button.run:hover{filter:brightness(1.08)}
+button:hover{filter:brightness(1.15)}
+label.opt{color:var(--dim); font-size:.78rem; display:flex; gap:5px; align-items:center; cursor:pointer; user-select:none}
+footer{padding:10px 22px; border-top:1px solid var(--line); color:var(--dim); font-size:.75rem}
+::-webkit-scrollbar{width:10px; height:10px}
+::-webkit-scrollbar-thumb{background:#232e3a; border-radius:5px}
+@media (max-width:720px){ .pane{flex:1 1 100%} }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">NOVA<span>_</span>playground</div>
+  <div class="tag">a small language + bytecode VM, running entirely in your browser</div>
+</header>
+
+<main>
+  <section class="pane">
+    <h2>program.nova
+      <div class="toolbar">
+        <select id="examples"></select>
+        <label class="opt"><input type="checkbox" id="traceBox"> trace</label>
+        <label class="opt"><input type="checkbox" id="disBox"> bytecode</label>
+        <button class="run" id="runBtn">Run ▸</button>
+      </div>
+    </h2>
+    <textarea id="editor" spellcheck="false"></textarea>
+  </section>
+  <section class="pane">
+    <h2>output</h2>
+    <div id="output"></div>
+  </section>
+</main>
+
+<footer>Built with a hand-written lexer, recursive-descent parser, bytecode compiler and stack VM — ported to JS for this page.</footer>
+
+<script>
+/* ============================== LEXER ============================== */
+const KEYWORDS = new Set(["let","print","if","else","while","fn","return","true","false"]);
+const OPERATORS = ["==","!=","<=",">=","&&","||","+","-","*","/","%","<",">","=","!"];
+const PUNCT = "(){},;";
+
+class LexError extends Error{constructor(m,line,col,src){super(m);this.line=line;this.col=col;this.src=src;}}
+
+function tokenize(src){
+  const toks=[]; let i=0,line=1,lineStart=0; const n=src.length;
+  const col=idx=>idx-lineStart+1;
+  while(i<n){
+    const c=src[i]; const startCol=col(i);
+    if(c==="\n"){line++;i++;lineStart=i;continue;}
+    if(/\s/.test(c)){i++;continue;}
+    if(src.startsWith("//",i)){while(i<n&&src[i]!=="\n")i++;continue;}
+    if(/[0-9]/.test(c)){
+      const start=i; while(i<n&&/[0-9]/.test(src[i]))i++;
+      if(i<n&&src[i]==="."&&/[0-9]/.test(src[i+1]||"")){
+        i++; while(i<n&&/[0-9]/.test(src[i]))i++;
+        toks.push({type:"NUMBER",value:parseFloat(src.slice(start,i)),line,col:startCol});
+      } else toks.push({type:"NUMBER",value:parseInt(src.slice(start,i),10),line,col:startCol});
+      continue;
+    }
+    if(/[A-Za-z_]/.test(c)){
+      const start=i; while(i<n&&/[A-Za-z0-9_]/.test(src[i]))i++;
+      const word=src.slice(start,i);
+      toks.push({type:KEYWORDS.has(word)?"KEYWORD":"IDENT",value:word,line,col:startCol});
+      continue;
+    }
+    if(c==='"'){
+      i++; const start=i;
+      while(i<n&&src[i]!=='"'){ if(src[i]==="\n") throw new LexError("Unterminated string.",line,startCol,src); i++; }
+      if(i>=n) throw new LexError("Unterminated string.",line,startCol,src);
+      toks.push({type:"STRING",value:src.slice(start,i),line,col:startCol}); i++;
+      continue;
+    }
+    let matched=false;
+    for(const op of OPERATORS){ if(src.startsWith(op,i)){ toks.push({type:"OP",value:op,line,col:startCol}); i+=op.length; matched=true; break; } }
+    if(matched) continue;
+    if(PUNCT.includes(c)){ toks.push({type:"PUNCT",value:c,line,col:startCol}); i++; continue; }
+    throw new LexError(`Unexpected character '${c}'.`,line,startCol,src);
+  }
+  toks.push({type:"EOF",value:null,line,col:col(i)});
+  return toks;
+}
+
+/* ============================== PARSER ============================== */
+class ParseError extends Error{constructor(m,line,col,src){super(m);this.line=line;this.col=col;this.src=src;}}
+
+class Parser{
+  constructor(tokens,src){this.t=tokens;this.pos=0;this.src=src;}
+  peek(){return this.t[this.pos];}
+  advance(){return this.t[this.pos++];}
+  check(type,value){const tok=this.peek();return tok.type===type&&(value===undefined||tok.value===value);}
+  match(type,...values){const tok=this.peek(); if(tok.type===type&&(!values.length||values.includes(tok.value))) return this.advance(); return null;}
+  err(msg,tok){tok=tok||this.peek(); return new ParseError(msg,tok.line,tok.col,this.src);}
+  expect(type,value){
+    if(this.check(type,value)) return this.advance();
+    const tok=this.peek(); const wanted=value!==undefined?value:type;
+    const seen=tok.type==="EOF"?"end of file":JSON.stringify(tok.value);
+    throw this.err(`Expected '${wanted}', but got ${seen}.`);
+  }
+  parseProgram(){const stmts=[]; while(!this.check("EOF")) stmts.push(this.statement()); return {k:"Program",statements:stmts};}
+  statement(){
+    if(this.match("KEYWORD","let")){const name=this.expect("IDENT").value; this.expect("OP","="); const v=this.expression(); this.expect("PUNCT",";"); return {k:"Let",name,value:v};}
+    if(this.match("KEYWORD","print")){this.expect("PUNCT","("); const v=this.expression(); this.expect("PUNCT",")"); this.expect("PUNCT",";"); return {k:"Print",value:v};}
+    if(this.match("KEYWORD","fn")) return this.fnDecl();
+    if(this.match("KEYWORD","return")){const v=this.check("PUNCT",";")?null:this.expression(); this.expect("PUNCT",";"); return {k:"Return",value:v};}
+    if(this.match("KEYWORD","if")) return this.ifStmt();
+    if(this.match("KEYWORD","while")){this.expect("PUNCT","("); const c=this.expression(); this.expect("PUNCT",")"); return {k:"While",condition:c,body:this.block()};}
+    if(this.check("PUNCT","{")) return this.block();
+    if(this.check("IDENT")&&this.t[this.pos+1].type==="OP"&&this.t[this.pos+1].value==="="){
+      const name=this.advance().value; this.advance(); const v=this.expression(); this.expect("PUNCT",";"); return {k:"Assign",name,value:v};
+    }
+    const expr=this.expression(); this.expect("PUNCT",";"); return {k:"ExprStmt",expr};
+  }
+  fnDecl(){
+    const name=this.expect("IDENT").value; this.expect("PUNCT","(");
+    const params=[];
+    if(!this.check("PUNCT",")")){ params.push(this.expect("IDENT").value); while(this.match("PUNCT",",")) params.push(this.expect("IDENT").value); }
+    this.expect("PUNCT",")");
+    return {k:"FnDecl",name,params,body:this.block()};
+  }
+  ifStmt(){
+    this.expect("PUNCT","("); const cond=this.expression(); this.expect("PUNCT",")");
+    const thenB=this.block(); let elseB=null;
+    if(this.match("KEYWORD","else")){ elseB = this.match("KEYWORD","if") ? {k:"Block",statements:[this.ifStmt()]} : this.block(); }
+    return {k:"If",condition:cond,thenBranch:thenB,elseBranch:elseB};
+  }
+  block(){
+    this.expect("PUNCT","{"); const stmts=[];
+    while(!this.check("PUNCT","}")&&!this.check("EOF")) stmts.push(this.statement());
+    this.expect("PUNCT","}"); return {k:"Block",statements:stmts};
+  }
+  expression(){return this.or();}
+  binary(next,...ops){let left=next.call(this); let tok; while((tok=this.match("OP",...ops))){const right=next.call(this); left={k:"Binary",op:tok.value,left,right};} return left;}
+  or(){return this.binary(this.and,"||");}
+  and(){return this.binary(this.equality,"&&");}
+  equality(){return this.binary(this.comparison,"==","!=");}
+  comparison(){return this.binary(this.term,"<","<=",">",">=");}
+  term(){return this.binary(this.factor,"+","-");}
+  factor(){return this.binary(this.unary,"*","/","%");}
+  unary(){const tok=this.match("OP","-","!"); if(tok) return {k:"Unary",op:tok.value,operand:this.unary()}; return this.primary();}
+  primary(){
+    let tok;
+    if((tok=this.match("NUMBER"))) return {k:"Number",value:tok.value};
+    if((tok=this.match("STRING"))) return {k:"String",value:tok.value};
+    if(this.match("KEYWORD","true")) return {k:"Bool",value:true};
+    if(this.match("KEYWORD","false")) return {k:"Bool",value:false};
+    if((tok=this.match("IDENT"))){
+      if(this.match("PUNCT","(")){
+        const args=[];
+        if(!this.check("PUNCT",")")){ args.push(this.expression()); while(this.match("PUNCT",",")) args.push(this.expression()); }
+        this.expect("PUNCT",")"); return {k:"Call",name:tok.value,args};
+      }
+      return {k:"Variable",name:tok.value};
+    }
+    if(this.match("PUNCT","(")){ const e=this.expression(); this.expect("PUNCT",")"); return e; }
+    tok=this.peek(); const seen=tok.type==="EOF"?"end of file":JSON.stringify(tok.value);
+    throw this.err(`Expected an expression, but got ${seen}.`);
+  }
+}
+function parse(src){ return new Parser(tokenize(src),src).parseProgram(); }
+
+/* ============================== COMPILER ============================== */
+class CompileError extends Error{}
+const BIN_OP = {"+":"ADD","-":"SUB","*":"MUL","/":"DIV","%":"MOD","==":"EQ","!=":"NE","<":"LT","<=":"LE",">":"GT",">=":"GE"};
+
+class NFunction{constructor(name,arity,chunk,numLocals){this.name=name;this.arity=arity;this.chunk=chunk;this.numLocals=numLocals;}}
+
+class Compiler{
+  constructor(params){ this.chunk={code:[],constants:[]}; this.locals = params ? Object.fromEntries(params.map((p,i)=>[p,i])) : null; }
+  emit(op,arg=null){ this.chunk.code.push([op,arg]); return this.chunk.code.length-1; }
+  addConst(v){ this.chunk.constants.push(v); return this.chunk.constants.length-1; }
+  patch(idx){ this.chunk.code[idx][1]=this.chunk.code.length; }
+  here(){ return this.chunk.code.length; }
+  compileProgram(prog){ for(const s of prog.statements) this.visit(s); this.emit("HALT"); return this.chunk; }
+  visit(node){ this["v_"+node.k](node); }
+  v_Let(n){ this.visit(n.value); if(this.locals){ if(!(n.name in this.locals)) this.locals[n.name]=Object.keys(this.locals).length; this.emit("STORE_LOCAL",this.locals[n.name]); } else this.emit("STORE_GLOBAL",n.name); }
+  v_Assign(n){ this.visit(n.value); if(this.locals && n.name in this.locals) this.emit("STORE_LOCAL",this.locals[n.name]); else this.emit("STORE_GLOBAL",n.name); }
+  v_ExprStmt(n){ this.visit(n.expr); this.emit("POP"); }
+  v_Print(n){ this.visit(n.value); this.emit("PRINT"); }
+  v_Block(n){ for(const s of n.statements) this.visit(s); }
+  v_Return(n){ if(!this.locals) throw new CompileError("'return' outside of a function."); if(n.value===null) this.emit("CONST",this.addConst(null)); else this.visit(n.value); this.emit("RETURN"); }
+  v_FnDecl(n){
+    if(this.locals) throw new CompileError(`Nested function '${n.name}' is not supported.`);
+    const sub=new Compiler(n.params); sub.visit(n.body); sub.emit("CONST",sub.addConst(null)); sub.emit("RETURN");
+    const fn=new NFunction(n.name,n.params.length,sub.chunk,Object.keys(sub.locals).length);
+    this.emit("CONST",this.addConst(fn)); this.emit("STORE_GLOBAL",n.name);
+  }
+  v_If(n){
+    this.visit(n.condition); const toElse=this.emit("JUMP_IF_FALSE",null); this.visit(n.thenBranch);
+    if(n.elseBranch){ const toEnd=this.emit("JUMP",null); this.patch(toElse); this.visit(n.elseBranch); this.patch(toEnd); }
+    else this.patch(toElse);
+  }
+  v_While(n){ const start=this.here(); this.visit(n.condition); const toEnd=this.emit("JUMP_IF_FALSE",null); this.visit(n.body); this.emit("JUMP",start); this.patch(toEnd); }
+  v_Number(n){ this.emit("CONST",this.addConst(n.value)); }
+  v_String(n){ this.emit("CONST",this.addConst(n.value)); }
+  v_Bool(n){ this.emit("CONST",this.addConst(n.value)); }
+  v_Variable(n){ if(this.locals && n.name in this.locals) this.emit("LOAD_LOCAL",this.locals[n.name]); else this.emit("LOAD_GLOBAL",n.name); }
+  v_Unary(n){ this.visit(n.operand); this.emit(n.op==="-"?"NEG":"NOT"); }
+  v_Binary(n){
+    if(n.op==="&&"||n.op==="||"){
+      this.visit(n.left); const j=this.emit(n.op==="&&"?"JUMP_IF_FALSE_OR_POP":"JUMP_IF_TRUE_OR_POP",null);
+      this.visit(n.right); this.patch(j);
+    } else { this.visit(n.left); this.visit(n.right); this.emit(BIN_OP[n.op]); }
+  }
+}
+function compileSource(src){ return new Compiler(null).compileProgram(parse(src)); }
+
+function disassemble(chunk,name,out){
+  name=name||"main"; out=out||[];
+  out.push(`== ${name} ==`);
+  chunk.code.forEach((instr,i)=>{
+    const [op,arg]=instr; let line=`${String(i).padStart(4,"0")}  ${op.padEnd(22)}`;
+    if(op==="CONST") line+=`${arg}   (${fmtConst(chunk.constants[arg])})`;
+    else if(arg!==null) line+=`${JSON.stringify(arg)}`;
+    out.push(line);
+  });
+  for(const c of chunk.constants) if(c instanceof NFunction){ out.push(""); disassemble(c.chunk,`fn ${c.name}`,out); }
+  return out;
+}
+function fmtConst(v){ if(v instanceof NFunction) return `<fn ${v.name}>`; return JSON.stringify(v); }
+
+/* ============================== VM ============================== */
+class NovaRuntimeError extends Error{}
+function isTruthy(v){ if(typeof v==="boolean") return v; if(typeof v==="number") return v!==0; if(typeof v==="string") return v.length>0; return v!==null&&v!==undefined; }
+function isNum(v){ return typeof v==="number"; }
+function toText(v){ if(v===true)return"true"; if(v===false)return"false"; if(v===null||v===undefined)return"nil"; return String(v); }
+
+class VM{
+  constructor(chunk,trace,onPrint,onTrace){ this.chunk=chunk; this.stack=[]; this.globals={}; this.trace=trace; this.onPrint=onPrint; this.onTrace=onTrace; }
+  pop(){ return this.stack.pop(); }
+  push(v){ this.stack.push(v); }
+  run(){
+    let code=this.chunk.code, consts=this.chunk.constants, pc=0, locals=null;
+    const frames=[]; let steps=0;
+    while(true){
+      if(++steps>2000000) throw new NovaRuntimeError("Too many steps — possible infinite loop.");
+      const [op,arg]=code[pc];
+      if(this.trace) this.onTrace(`${"  ".repeat(frames.length)}${String(pc).padStart(4,"0")}  ${op.padEnd(22)}${arg===null?"":JSON.stringify(arg)}  stack=${JSON.stringify(this.stack)}`);
+      pc++;
+      switch(op){
+        case "CONST": this.push(consts[arg]); break;
+        case "LOAD_GLOBAL": if(!(arg in this.globals)) throw new NovaRuntimeError(`Undefined variable '${arg}'.`); this.push(this.globals[arg]); break;
+        case "STORE_GLOBAL": this.globals[arg]=this.pop(); break;
+        case "LOAD_LOCAL": this.push(locals[arg]); break;
+        case "STORE_LOCAL": locals[arg]=this.pop(); break;
+        case "POP": this.pop(); break;
+        case "ADD": case "SUB": case "MUL": case "DIV": case "MOD": {
+          const b=this.pop(), a=this.pop(); this.push(this.arith(op,a,b)); break;
+        }
+        case "LT": case "LE": case "GT": case "GE": { const b=this.pop(), a=this.pop(); this.push(this.cmp(op,a,b)); break; }
+        case "EQ": { const b=this.pop(), a=this.pop(); this.push(this.eq(a,b)); break; }
+        case "NE": { const b=this.pop(), a=this.pop(); this.push(!this.eq(a,b)); break; }
+        case "NEG": { const a=this.pop(); if(!isNum(a)) throw new NovaRuntimeError("Can only negate numbers."); this.push(-a); break; }
+        case "NOT": this.push(!isTruthy(this.pop())); break;
+        case "PRINT": this.onPrint(toText(this.pop())); break;
+        case "JUMP": pc=arg; break;
+        case "JUMP_IF_FALSE": if(!isTruthy(this.pop())) pc=arg; break;
+        case "JUMP_IF_FALSE_OR_POP": if(!isTruthy(this.stack[this.stack.length-1])) pc=arg; else this.pop(); break;
+        case "JUMP_IF_TRUE_OR_POP": if(isTruthy(this.stack[this.stack.length-1])) pc=arg; else this.pop(); break;
+        case "CALL": {
+          const callee=this.stack[this.stack.length-1-arg];
+          if(!(callee instanceof NFunction)) throw new NovaRuntimeError(`${toText(callee)} is not a function.`);
+          if(callee.arity!==arg) throw new NovaRuntimeError(`${callee.name}() expects ${callee.arity} argument(s) but got ${arg}.`);
+          if(frames.length>=1000) throw new NovaRuntimeError("Stack overflow (too much recursion).");
+          const base=this.stack.length-arg; const args=this.stack.slice(base);
+          this.stack.length=base-1;
+          frames.push([code,consts,pc,locals]);
+          code=callee.chunk.code; consts=callee.chunk.constants;
+          locals=args.concat(new Array(callee.numLocals-arg).fill(null)); pc=0; break;
+        }
+        case "RETURN": { const result=this.pop(); [code,consts,pc,locals]=frames.pop(); this.push(result); break; }
+        case "HALT": return;
+        default: throw new NovaRuntimeError(`Unknown opcode ${op}`);
+      }
+    }
+  }
+  arith(op,a,b){
+    if(op==="ADD" && typeof a==="string" && typeof b==="string") return a+b;
+    if(!(isNum(a)&&isNum(b))) throw new NovaRuntimeError(`Cannot apply ${op} to ${toText(a)} and ${toText(b)}.`);
+    if(op==="ADD") return a+b; if(op==="SUB") return a-b; if(op==="MUL") return a*b;
+    if(b===0) throw new NovaRuntimeError("Division by zero.");
+    if(op==="MOD") return a%b;
+    return a/b;
+  }
+  cmp(op,a,b){
+    const bothNum=isNum(a)&&isNum(b), bothStr=typeof a==="string"&&typeof b==="string";
+    if(!(bothNum||bothStr)) throw new NovaRuntimeError(`Cannot compare ${toText(a)} and ${toText(b)}.`);
+    if(op==="LT") return a<b; if(op==="LE") return a<=b; if(op==="GT") return a>b; return a>=b;
+  }
+  eq(a,b){ if((typeof a==="boolean")!==(typeof b==="boolean")) return false; return a===b; }
+}
+
+/* ============================== UI wiring ============================== */
+function formatSrcError(kind,message,line,col,source){
+  const lines=source.split("\n"); const raw=lines[line-1]||""; const stripped=raw.trim();
+  const leadWs=raw.length-raw.replace(/^\s+/,"").length; const ptr=Math.max(col-leadWs,1);
+  return `${kind} at line ${line}:\n    ${stripped}\n    ${" ".repeat(ptr-1)}^\n${message}`;
+}
+
+const outEl=document.getElementById("output");
+function clearOut(){ outEl.innerHTML=""; }
+function writeLine(text,cls){ const d=document.createElement("div"); d.className=cls; d.textContent=text; outEl.appendChild(d); }
+
+document.getElementById("runBtn").addEventListener("click",()=>{
+  clearOut();
+  const src=document.getElementById("editor").value;
+  const doTrace=document.getElementById("traceBox").checked;
+  const doDis=document.getElementById("disBox").checked;
+  try{
+    const chunk=compileSource(src);
+    if(doDis){ disassemble(chunk).forEach(l=>writeLine(l,"line-trace")); writeLine("--- output ---","line-trace"); }
+    const vm=new VM(chunk, doTrace, (t)=>writeLine(t,"line-out"), (t)=>writeLine(t,"line-trace"));
+    vm.run();
+    if(outEl.children.length===0) writeLine("(no output)","line-trace");
+  }catch(e){
+    if(e instanceof LexError || e instanceof ParseError) writeLine(formatSrcError("Syntax error",e.message,e.line,e.col,e.src),"line-err");
+    else if(e instanceof CompileError) writeLine("Compile error: "+e.message,"line-err");
+    else if(e instanceof NovaRuntimeError) writeLine("Runtime error: "+e.message,"line-err");
+    else writeLine("Internal error: "+e.message,"line-err");
+  }
+});
+
+const EXAMPLES = {
+  "FizzBuzz": `// FizzBuzz in NOVA
+let i = 1;
+while (i <= 15) {
+    if (i % 15 == 0) { print("FizzBuzz"); }
+    else if (i % 3 == 0) { print("Fizz"); }
+    else if (i % 5 == 0) { print("Buzz"); }
+    else { print(i); }
+    i = i + 1;
+}`,
+  "Fibonacci (recursive)": `fn fib(n) {
+    if (n < 2) { return n; }
+    return fib(n - 1) + fib(n - 2);
+}
+
+let i = 0;
+while (i < 10) {
+    print(fib(i));
+    i = i + 1;
+}`,
+  "Factorial": `fn factorial(n) {
+    if (n <= 1) { return 1; }
+    return n * factorial(n - 1);
+}
+
+print(factorial(10));`,
+  "Functions & strings": `fn greet(name) {
+    print("Hello, " + name + "!");
+}
+
+fn square(x) { return x * x; }
+
+greet("NOVA");
+print(square(7));`,
+  "Syntax error demo": `let y = ;`,
+};
+
+const sel=document.getElementById("examples");
+Object.keys(EXAMPLES).forEach(name=>{ const o=document.createElement("option"); o.value=name; o.textContent=name; sel.appendChild(o); });
+function loadExample(name){ document.getElementById("editor").value=EXAMPLES[name]; }
+sel.addEventListener("change",()=>loadExample(sel.value));
+loadExample("FizzBuzz");
+document.getElementById("runBtn").click();
+</script>
+</body>
+</html>

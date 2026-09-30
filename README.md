@@ -1,4 +1,4 @@
-🔗 **[Try NOVA in your browser](your-pages-link-here)** — no install needed
+🔗 **[Try NOVA in your browser](https://bashirun-008.github.io/Nova/)** — no install needed
 # NOVA
 
 NOVA is a small programming language with its own lexer, parser, bytecode compiler, and stack-based virtual machine — all written from scratch in Python.

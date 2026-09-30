@@ -245,6 +245,7 @@ class Compiler{
   v_Bool(n){ this.emit("CONST",this.addConst(n.value)); }
   v_Variable(n){ if(this.locals && n.name in this.locals) this.emit("LOAD_LOCAL",this.locals[n.name]); else this.emit("LOAD_GLOBAL",n.name); }
   v_Unary(n){ this.visit(n.operand); this.emit(n.op==="-"?"NEG":"NOT"); }
+  v_Call(n){ this.emit("LOAD_GLOBAL",n.name); for(const a of n.args) this.visit(a); this.emit("CALL",n.args.length); }
   v_Binary(n){
     if(n.op==="&&"||n.op==="||"){
       this.visit(n.left); const j=this.emit(n.op==="&&"?"JUMP_IF_FALSE_OR_POP":"JUMP_IF_TRUE_OR_POP",null);
